@@ -1,0 +1,168 @@
+#!/bin/bash
+#
+# ARG_OPTIONAL_SINGLE([host], , [The host ip address of the chassis hardware console], [])
+# ARG_OPTIONAL_SINGLE([username], , [Your username], [super])
+# ARG_OPTIONAL_SINGLE([password], , [Your password], [pass])
+# ARG_OPTIONAL_BOOLEAN([print], , [Print all blades])
+# ARG_OPTIONAL_REPEATED([on], , [Turn blade on])
+# ARG_OPTIONAL_REPEATED([shutdown], , [Shutdown blade])
+# ARG_OPTIONAL_REPEATED([off], , [Force blade off])
+# ARG_OPTIONAL_REPEATED([sleep], , [Put blade into standby-off])
+# ARG_OPTIONAL_REPEATED([wake], , [Put blade into standby-on])
+# ARG_HELP([A script to control blades in the bullx blade system])
+# ARG_VERSION([echo "0.1"])
+# ARGBASH_GO
+
+# [ <-- needed because of Argbash
+
+#set eux
+
+CURL_FLAGS='-s --connect-timeout 2 --max-time 3'
+COOKIE=
+
+# Check if the Chassis Hardware Console is reachable
+function check {
+  # Check if the blade chassis server is reachable
+  if curl $CURL_FLAGS 'http://'${_arg_host}'/auth.asp' | grep 'Chassis Hardware Console' > /dev/null
+  then
+    return 0
+  else
+    echo "Chassis Hardware Console unreachable" 1>&2
+    return 1
+  fi
+}
+
+# End a session
+# param1: cookie
+function login {
+  COOKIE=$(curl $CURL_FLAGS 'http://'${_arg_host}'/auth.asp' \
+    --data-raw 'nickname=&login='${_arg_username}'&password='${_arg_password}'&action_login=Log+On' \
+    -o /dev/null -D - \
+    | sed -e '/Set-Cookie:.*pp_session_id=/!d;s/.*pp_session_id=\([0-9A-F]*\).*/\1/' )
+  
+  if test -z $COOKIE
+  then
+    echo "Invalid login" 1>&2
+    return 1
+  fi
+}
+
+# End the current session
+function logout {
+  curl $CURL_FLAGS 'http://'${_arg_host}'/logout' \
+    -H 'Cookie: pp_session_id='"$COOKIE" \
+    -s -o /dev/null -D - | grep "pp_session_id" > /dev/null
+}
+
+# Turn on the power for a blade
+# param1: blade id
+function powerBlade {
+  curl $CURL_FLAGS 'http://'${_arg_host}'/MT_Power.asp' \
+    -H 'Cookie: pp_session_id='"$COOKIE" \
+    --data-raw 'action_poweron_blade=Power+On&ID_POWER_'$1'=on&__templates__=+ipmichassisinfo+ipmichassispowermaintenance' > /dev/null
+}
+
+
+# Shutdown a blade
+# param1: blade id
+function shutdownBlade {
+  curl $CURL_FLAGS 'http://'${_arg_host}'/MT_Power.asp' \
+    -H 'Cookie: pp_session_id='"$COOKIE" \
+    --data-raw 'action_softshutdown_blade=Power+Off&ID_POWER_'$1'=on&__templates__=+ipmichassisinfo+ipmichassispowermaintenance' > /dev/null
+}
+
+# Turn off the power for a blade
+# param1: blade id
+function poweroffBlade {
+  curl $CURL_FLAGS 'http://'${_arg_host}'/MT_Power.asp' \
+    -H 'Cookie: pp_session_id='"$COOKIE" \
+    --data-raw 'action_poweroff_blade=Force+Power+Off&ID_POWER_'$1'=on&__templates__=+ipmichassisinfo+ipmichassispowermaintenance' > /dev/null
+}
+
+# Put a blade to sleep
+# param1: blade id
+function sleepBlade {
+  curl $CURL_FLAGS 'http://'${_arg_host}'/MT_Power.asp' \
+    -H 'Cookie: pp_session_id='"$COOKIE" \
+    --data-raw 'action_powerasleep_blade=Power+Asleep&ID_POWER_'$1'=on&__templates__=+ipmichassisinfo+ipmichassispowermaintenance' \ > /dev/null
+}
+
+# Wake blade up
+# param1: blade id
+function wakeBlade {
+  curl $CURL_FLAGS 'http://'${_arg_host}'/MT_Power.asp' \
+    -H 'Cookie: pp_session_id='"$COOKIE" \
+    --data-raw 'action_powerawake_blade=Power+Awake&ID_POWER_'$1'=on&__templates__=+ipmichassisinfo+ipmichassispowermaintenance' > /dev/null
+}
+
+# Print the blade states
+function printBlades {
+  declare -a STATE="( $(curl $CURL_FLAGS 'http://'${_arg_host}'/SY_Power.asp' \
+    -H 'Cookie: pp_session_id='"$COOKIE" \
+    | grep -Po "(\"[^\"]*\",?){18}" | sed -e "s/,/ /g"
+    ) )"
+  
+  if test ${#STATE[*]} -ne 54
+  then
+    echo "Failed to parse Blade states" 1>&2
+    return 1
+  fi
+  
+  printf '%2s %8s %7s %13s\n' 'ID' 'Presence' 'Type' 'Power'
+  for id in {0..17}
+  do
+    printf '%2s %8s %7s %13s\n' "$(( $id + 1 ))" "${STATE[$id]}" "${STATE[$(( $id + 18 ))]}" "${STATE[$(( $id + 36 ))]}"
+  done
+}
+
+
+
+# Check if chassis hardware console is reachable
+check || exit 1
+
+# Login
+login || exit 1
+
+# Print blades, if --orint is set or no actions are set
+if [[ -z $_arg_on && -z $_arg_shutdown && -z $_arg_off && -z $_arg_sleep && -z $_arg_wake ]]
+then
+  printBlades
+  echo "Use --help to print availabe options"
+elif [ $_arg_print = "on" ]
+then
+  printBlades
+fi
+
+for x in "${_arg_on[@]}"
+do 
+echo "Powering on blade $x"
+powerBlade $x || echo "Failed to power on blade $x"
+done
+
+for x in "${_arg_shutdown[@]}"
+do 
+echo "Requesting shutdown for blade $x"
+shutdownBlade $x || echo "Failed to shutdown blade $x"
+done
+
+for x in "${_arg_off[@]}"
+do
+echo "Powering off blade $x"
+poweroffBlade $x || echo "Failed to power off blade $x"
+done
+
+for x in "${_arg_sleep[@]}"
+do
+echo "Putting blade $x into standby-off"
+sleepBlade $x || echo "Failed putting blade $x to sleep"
+done
+
+for x in "${_arg_awake[@]}"
+do
+echo "Putting blade $x into standby-on"
+awakeBlade $x || echo "Failed waking blade $x up"
+done
+
+logout
+
+# ] <-- needed because of Argbash
